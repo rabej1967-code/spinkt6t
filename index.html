@@ -879,8 +879,12 @@ var editingGradeScale = [];
 // ============================================================
 function num(v){ return isNaN(Number(v)) ? 0 : Number(v); }
 
+// Sel dianggap "belum diisi" hanya jika null/undefined/kosong -- markah 0 yang
+// sebenar TETAP dikira supaya purata adil (0 bukan sama dengan "tiada data").
+function hasMark(m){ return m !== null && m !== undefined && m !== ''; }
+
 function avg(arr){
-  var valid = arr.map(function(m){ return num(m); }).filter(function(m){ return m > 0; });
+  var valid = arr.filter(hasMark).map(function(m){ return num(m); });
   if (!valid.length) return 0;
   return valid.reduce(function(a,b){ return a+b; }, 0) / valid.length;
 }
@@ -1221,7 +1225,7 @@ function doTambahPelajar(){
   showModal('Tambah Pelajar', 'Nama pelajar:', 'input', '').then(function(v){
     if (!v) return;
     var subj = getCurSubj();
-    subj.kelasData[k].push({ nama:v, kelas:k, markah:subj.ujian.map(function(){ return 0; }) });
+    subj.kelasData[k].push({ nama:v, kelas:k, markah:subj.ujian.map(function(){ return null; }) });
     renderAll();
     autoSave();
   });
@@ -1233,7 +1237,7 @@ function doTambahUjian(){
     var subj = getCurSubj();
     subj.ujian.push(v);
     Object.values(subj.kelasData).forEach(function(arr){
-      arr.forEach(function(p){ p.markah.push(0); });
+      arr.forEach(function(p){ p.markah.push(null); });
     });
     renderAll();
     autoSave();
@@ -1282,7 +1286,7 @@ function delPelajar(kelas, nama){
 
 function updateMark(kelas, nama, i, val){
   var p = getCurSubj().kelasData[kelas].find(function(x){ return x.nama===nama; });
-  if (p){ p.markah[i] = Math.round(num(val)); renderAll(); autoSave(); }
+  if (p){ p.markah[i] = (val==='' ? null : Math.round(num(val))); renderAll(); autoSave(); }
 }
 
 function doReset(){
@@ -1413,8 +1417,8 @@ function renderTable(data){
       +'</div></td>'
       +'<td style="color:#64748b">'+p.kelas+'</td>';
     p.markah.forEach(function(m,j){
-      b += '<td class="'+cellClass(num(m))+'">'
-        +'<input type="number" value="'+Math.round(num(m))+'" min="0" max="100" '
+      b += '<td class="'+(hasMark(m)?cellClass(num(m)):'')+'">'
+        +'<input type="number" value="'+(hasMark(m)?Math.round(num(m)):'')+'" min="0" max="100" placeholder="-" '
         +'onchange="updateMark(\''+p.kelas+'\',\''+p.nama+'\','+j+',this.value)">'
         +'</td>';
     });
@@ -1427,7 +1431,7 @@ function renderTable(data){
 
   var uAvgs = [];
   subj.ujian.forEach(function(u,i){
-    var vals = data.map(function(p){ return num(p.markah[i]); }).filter(function(m){ return m>0; });
+    var vals = data.filter(function(p){ return hasMark(p.markah[i]); }).map(function(p){ return num(p.markah[i]); });
     uAvgs.push(vals.length ? vals.reduce(function(a,b){return a+b;},0)/vals.length : 0);
   });
   var totAvg = uAvgs.filter(function(v){return v>0;}).length
@@ -1488,7 +1492,7 @@ function renderAnalytics(data){
     : '<div class="no-data" style="color:#10b981">Tiada pelajar berisiko</div>';
 
   var diffs = data.filter(function(p){ return p.markah.length>=2; }).map(function(p){
-    var valid = p.markah.map(function(m){return num(m);}).filter(function(m){return m>0;});
+    var valid = p.markah.filter(hasMark).map(function(m){return num(m);});
     if (valid.length<2) return null;
     return { nama:p.nama, kelas:p.kelas, diff: valid[valid.length-1]-valid[0] };
   }).filter(function(d){ return d!==null; });
@@ -1529,7 +1533,7 @@ function renderCharts(data){
 
   var tLabels = subj.ujian;
   var tVals = subj.ujian.map(function(u,i){
-    var vals = data.map(function(p){ return num(p.markah[i]); }).filter(function(m){return m>0;});
+    var vals = data.filter(function(p){ return hasMark(p.markah[i]); }).map(function(p){ return num(p.markah[i]); });
     return vals.length ? parseFloat((vals.reduce(function(a,b){return a+b;},0)/vals.length).toFixed(1)) : 0;
   });
   tLastData = { labels:tLabels, vals:tVals };
@@ -1638,7 +1642,7 @@ function handleCSV(e){
       var k=String(r[0]), n=String(r[1]);
       if (!subj.kelasData[k]) subj.kelasData[k]=[];
       while (subj.ujian.length < r.length-2) subj.ujian.push('Ujian '+(subj.ujian.length+1));
-      subj.kelasData[k].push({ nama:n, kelas:k, markah:r.slice(2).map(function(v){ return Math.round(num(v)); }) });
+      subj.kelasData[k].push({ nama:n, kelas:k, markah:r.slice(2).map(function(v){ return (v===undefined||v===null||String(v).trim()==='') ? null : Math.round(num(v)); }) });
     });
     renderKelasSel();
     renderAll();

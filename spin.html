@@ -390,7 +390,7 @@ td input[type=number]:focus { outline: none; border-color: #1a56db; box-shadow: 
         <div>
           <div class="a-section-t">Tambah Pengguna Baru</div>
           <div class="a-row"><label class="a-lbl">Nama Pengguna</label><input class="a-inp" id="nu-name" placeholder="cth: guru_ali"></div>
-          <div class="a-row"><label class="a-lbl">Kata Laluan</label><input class="a-inp" id="nu-pw" type="password" placeholder="min. 4 aksara"></div>
+          <div style="font-size:10px;color:#64748b;margin:2px 0 6px">Kata laluan akan dijana secara automatik (random) — anda akan diberi kata laluan itu selepas tambah, untuk diserahkan kepada pengguna.</div>
           <div class="a-row">
             <label class="a-lbl">Peranan</label>
             <select class="a-inp" id="nu-role" style="cursor:pointer">
@@ -528,55 +528,65 @@ td input[type=number]:focus { outline: none; border-color: #1a56db; box-shadow: 
 
 <script>
 // ============================================================
-// SUPABASE CONFIG
+// SUPABASE CONFIG + TENANT (SEKOLAH)
 // ============================================================
-var SB_URL = 'https://zzsbjinzsqvydhgeqlwv.supabase.co';
-var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp6c2JqaW56c3F2eWRoZ2VxbHd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwMDI4NzQsImV4cCI6MjA5MzU3ODg3NH0.teYJYmMn63GxZbDRY5UCI7c-6o0IluZVhCzeKrQEwLY';
+var SB_URL = 'https://aowzftmdriukxbltjtpm.supabase.co';
+var SB_ANON_KEY = 'PASTE_ANON_KEY_DI_SINI'; // <-- ganti dengan anon key projek Supabase
+var SB_FN_ADMIN = SB_URL + '/functions/v1/spin-admin';
 
-var SB_HEADERS = {
-  'Content-Type': 'application/json',
-  'apikey': SB_KEY,
-  'Authorization': 'Bearer ' + SB_KEY,
-  'Prefer': 'return=representation'
-};
+var urlParams = new URLSearchParams(window.location.search);
+var KOD_SEKOLAH = (urlParams.get('t') || '').trim().toUpperCase();
 
-// Supabase REST helpers
-async function sbGet(table, params) {
-  var url = SB_URL + '/rest/v1/' + table + (params ? '?' + params : '');
-  var r = await fetch(url, { headers: SB_HEADERS });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+function sbMakeEmail(username, kodSekolah){
+  var u = (username||'').trim().toLowerCase().replace(/[^a-z0-9_.]/g,'');
+  var k = (kodSekolah||'').trim().toLowerCase().replace(/[^a-z0-9]/g,'');
+  return u + '.' + k + '@cikgukita.internal';
 }
 
-async function sbPost(table, body) {
-  var r = await fetch(SB_URL + '/rest/v1/' + table, {
-    method: 'POST', headers: SB_HEADERS, body: JSON.stringify(body)
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+var SPIN_SESS = null; // {access_token, refresh_token, user_id}
+var SPIN_SKEY = 'spin_sess_v4_' + (KOD_SEKOLAH||'nokod');
+function loadSpinSess(){ try{ return JSON.parse(localStorage.getItem(SPIN_SKEY)); }catch(e){ return null; } }
+function saveSpinSess(){ localStorage.setItem(SPIN_SKEY, JSON.stringify(SPIN_SESS)); }
+function clearSpinSess(){ localStorage.removeItem(SPIN_SKEY); }
+
+// Supabase REST helpers — guna token PENGGUNA (bukan static anon key sahaja),
+// supaya RLS kuatkuasa siapa sebenarnya buat request ni.
+async function sbFetch(path, opts){
+  opts = opts || {};
+  var headers = Object.assign({'apikey': SB_ANON_KEY,'Content-Type':'application/json'}, opts.headers||{});
+  headers['Authorization'] = 'Bearer ' + ((SPIN_SESS&&SPIN_SESS.access_token) ? SPIN_SESS.access_token : SB_ANON_KEY);
+  return fetch(SB_URL + path, Object.assign({}, opts, {headers:headers}));
+}
+async function sbGet(table, params){
+  var res = await sbFetch('/rest/v1/'+table+(params?'?'+params:''), {method:'GET'});
+  if(!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
-async function sbPatch(table, params, body) {
-  var r = await fetch(SB_URL + '/rest/v1/' + table + '?' + params, {
-    method: 'PATCH', headers: SB_HEADERS, body: JSON.stringify(body)
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+
+// ============================================================
+// AUTH STATE (Supabase Auth + RLS)
+// ============================================================
+var SPIN_CU = null; // {username, role, kod_sekolah, must_change_password}
+
+async function spinFetchProfile(){
+  try{
+    var rows = await sbGet('spin_users', 'select=username,role,kod_sekolah,must_change_password&user_id=eq.'+SPIN_SESS.user_id);
+    if(!rows.length) return false;
+    SPIN_CU = rows[0];
+    return true;
+  }catch(e){ return false; }
 }
 
-async function sbDelete(table, params) {
-  var r = await fetch(SB_URL + '/rest/v1/' + table + '?' + params, {
-    method: 'DELETE', headers: SB_HEADERS
-  });
-  if (!r.ok) throw new Error(await r.text());
+async function spinRefreshToken(){
+  if(!SPIN_SESS||!SPIN_SESS.refresh_token) return false;
+  var res = await sbFetch('/auth/v1/token?grant_type=refresh_token', {method:'POST', body: JSON.stringify({refresh_token:SPIN_SESS.refresh_token})});
+  if(!res.ok) return false;
+  var d = await res.json();
+  SPIN_SESS = {access_token:d.access_token, refresh_token:d.refresh_token, user_id:d.user.id};
+  saveSpinSess();
   return true;
 }
-
-// ============================================================
-// AUTH STATE
-// ============================================================
-var SPIN_CU = null;
-var SPIN_USERS = [];
 
 // ============================================================
 // BOOT
@@ -584,42 +594,33 @@ var SPIN_USERS = [];
 async function spinBoot() {
   setLoadingMsg('Menyambung ke pangkalan data...', 10);
   try {
-    // Wake up Supabase (keep-alive ping)
-    setLoadingMsg('Mengejutkan pangkalan data...', 25);
-    await ensureTables();
-    hideLoadingTip();
-    setLoadingMsg('Memuat senarai pengguna...', 55);
-    SPIN_USERS = await sbGet('spin_auth', 'select=*');
-
-    setLoadingMsg('Menyemak sesi...', 80);
-    var sess = null;
-    try { sess = JSON.parse(localStorage.getItem('spin_session_v3')); } catch(e){}
-    if (sess && sess.username) {
-      var u = SPIN_USERS.find(function(x){ return x.username === sess.username; });
-      if (u) {
-        SPIN_CU = u;
+    if(!KOD_SEKOLAH){
+      hideLoading(); showAuthScreen();
+      document.getElementById('auth-err').textContent = 'URL tiada kod sekolah (?t=KODSEKOLAH). Hubungi admin.';
+      return;
+    }
+    setLoadingMsg('Menyemak sesi...', 55);
+    SPIN_SESS = loadSpinSess();
+    if (SPIN_SESS && SPIN_SESS.access_token) {
+      if (await spinFetchProfile()) {
         setLoadingMsg('Selamat datang semula!', 100);
         setTimeout(function(){ hideLoading(); }, 400);
         await spinLoginOK();
         return;
       }
+      if (await spinRefreshToken() && await spinFetchProfile()) {
+        setTimeout(function(){ hideLoading(); }, 400);
+        await spinLoginOK();
+        return;
+      }
     }
+    clearSpinSess(); SPIN_SESS=null; SPIN_CU=null;
     setLoadingMsg('Bersedia!', 100);
     setTimeout(function(){ hideLoading(); showAuthScreen(); }, 400);
   } catch(e) {
     setLoadingMsg('Ralat sambungan. Cuba semula...', 0);
     console.error(e);
-    setTimeout(function(){ hideLoading(); showAuthScreen(); }, 3000);
-  }
-}
-
-async function ensureTables() {
-  // Try to query tables; if fail, the SQL needs to be run
-  try {
-    await sbGet('spin_auth', 'limit=1');
-    await sbGet('spin_data', 'limit=1');
-  } catch(e) {
-    throw new Error('Table belum dibuat. Sila jalankan SQL setup dalam Supabase dahulu.');
+    setTimeout(function(){ hideLoading(); showAuthScreen(); }, 1500);
   }
 }
 
@@ -631,22 +632,11 @@ function setLoadingMsg(msg, pct) {
     if (bar) bar.style.width = pct + '%';
   }
 }
-
-function hideLoadingTip() {
-  var el = document.getElementById('loading-tip');
-  if (el) el.style.display = 'none';
-}
-
-function hideLoading() {
-  var el = document.getElementById('loading-overlay');
-  if (el) el.style.display = 'none';
-}
-
+function hideLoadingTip() { var el = document.getElementById('loading-tip'); if (el) el.style.display = 'none'; }
+function hideLoading() { var el = document.getElementById('loading-overlay'); if (el) el.style.display = 'none'; }
 function showAuthScreen() {
   var as = document.getElementById('auth-screen');
-  as.style.display = 'flex';
-  as.style.alignItems = 'center';
-  as.style.justifyContent = 'center';
+  as.style.display = 'flex'; as.style.alignItems = 'center'; as.style.justifyContent = 'center';
 }
 
 // ============================================================
@@ -658,16 +648,18 @@ async function doLogin() {
   var err = document.getElementById('auth-err');
   var btn = document.getElementById('login-btn');
   err.textContent = '';
+  if(!KOD_SEKOLAH){ err.textContent = 'URL tiada kod sekolah (?t=KODSEKOLAH).'; return; }
   if (!u || !p) { err.textContent = 'Sila isi semua maklumat.'; return; }
 
   btn.disabled = true; btn.textContent = 'Sedang log masuk...';
   try {
-    // Reload users from DB
-    SPIN_USERS = await sbGet('spin_auth', 'select=*');
-    var found = SPIN_USERS.find(function(x){ return x.username === u && x.password === p; });
-    if (!found) { err.textContent = 'Nama pengguna atau kata laluan tidak sah.'; return; }
-    SPIN_CU = found;
-    localStorage.setItem('spin_session_v3', JSON.stringify({ username: u }));
+    var email = sbMakeEmail(u, KOD_SEKOLAH);
+    var res = await sbFetch('/auth/v1/token?grant_type=password', {method:'POST', body: JSON.stringify({email:email,password:p})});
+    if(!res.ok){ err.textContent = 'Nama pengguna atau kata laluan tidak sah.'; return; }
+    var d = await res.json();
+    SPIN_SESS = {access_token:d.access_token, refresh_token:d.refresh_token, user_id:d.user.id};
+    saveSpinSess();
+    if(!await spinFetchProfile()){ err.textContent = 'Akaun wujud tapi profil tidak dijumpai. Hubungi admin.'; return; }
     document.getElementById('auth-pass').value = '';
     document.getElementById('auth-screen').style.display = 'none';
     await spinLoginOK();
@@ -679,6 +671,7 @@ async function doLogin() {
 }
 
 async function spinLoginOK() {
+  if(SPIN_CU.must_change_password){ spinForcePwScreen(); return; }
   document.getElementById('app').style.display = 'flex';
   spinRenderUserBar();
   setSaveStatus('Memuatkan data...', 'saving');
@@ -695,10 +688,9 @@ async function spinLoginOK() {
 
 function doLogout() {
   allData = {}; curTahun = '2025'; subjects = {}; curSubject = null;
-  SPIN_CU = null;
+  SPIN_CU = null; SPIN_SESS = null; clearSpinSess();
   stopAutoRefresh();
   stopKeepAlive();
-  localStorage.removeItem('spin_session_v3');
   document.getElementById('app').style.display = 'none';
   showAuthScreen();
   document.getElementById('auth-user').value = '';
@@ -714,13 +706,38 @@ function spinRenderUserBar() {
   var roleLabel = SPIN_CU.role === 'admin'
     ? '<span class="ui-role-admin">ADMIN</span>'
     : '<span class="ui-role-guru">GURU</span>';
-  bar.innerHTML = '<span class="ui-name">&#128100; ' + SPIN_CU.username + '</span>'
+  bar.innerHTML = '<span class="ui-name">&#128100; ' + SPIN_CU.username + ' &middot; ' + KOD_SEKOLAH + '</span>'
     + roleLabel
     + (SPIN_CU.role === 'admin' ? '<button class="ui-adm-btn" onclick="openAdmin()">&#9881; Admin</button>' : '')
     + '<button class="ui-out-btn" onclick="doLogout()">Keluar</button>';
 }
 
-// ---- Admin panel ----
+// ── First-login: paksa tukar pasword random ──
+function spinForcePwScreen(){
+  hideLoading(); showAuthScreen();
+  var scr = document.getElementById('auth-screen');
+  var card = scr.querySelector('.auth-card') || scr;
+  card.innerHTML =
+    '<div class="auth-card-title">Set Kata Laluan Baru</div>'+
+    '<div class="a-note" style="margin-bottom:10px">Ini kali pertama anda log masuk. Sila tetapkan kata laluan baru anda sendiri.</div>'+
+    '<div class="a-grp"><label class="a-lbl">Kata Laluan Baru</label><input class="a-inp" id="fpw-new" type="password" placeholder="min. 6 aksara"></div>'+
+    '<div class="a-grp"><label class="a-lbl">Sahkan Kata Laluan</label><input class="a-inp" id="fpw-conf" type="password"></div>'+
+    '<button class="a-btn" onclick="spinForcePwSubmit()">Simpan &amp; Teruskan &rarr;</button>'+
+    '<div class="a-err" id="fpw-err"></div>';
+}
+async function spinForcePwSubmit(){
+  var nw=document.getElementById('fpw-new').value;
+  var cf=document.getElementById('fpw-conf').value;
+  var err=document.getElementById('fpw-err');
+  if(nw.length<6){err.textContent='Min. 6 aksara.';return;}
+  if(nw!==cf){err.textContent='Tidak sepadan.';return;}
+  var res = await sbFetch('/auth/v1/user', {method:'PUT', body: JSON.stringify({password:nw})});
+  if(!res.ok){err.textContent='Gagal tukar kata laluan. Cuba lagi.';return;}
+  await sbFetch('/rest/v1/spin_users?user_id=eq.'+SPIN_SESS.user_id, {method:'PATCH', headers:{'Prefer':'return=minimal'}, body: JSON.stringify({must_change_password:false})});
+  location.reload();
+}
+
+// ---- Admin panel (guna Edge Function spin-admin) ----
 async function openAdmin() {
   if (!SPIN_CU || SPIN_CU.role !== 'admin') return;
   await spinRenderUserList();
@@ -734,20 +751,31 @@ function admTab(tab, btn) {
   document.querySelectorAll('.adm-tab').forEach(function(b){ b.classList.remove('on'); });
   btn.classList.add('on');
 }
+async function admFn(action, payload){
+  var res = await fetch(SB_FN_ADMIN, {
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'Bearer '+SPIN_SESS.access_token,'apikey':SB_ANON_KEY},
+    body: JSON.stringify(Object.assign({action:action}, payload||{}))
+  });
+  var d = await res.json();
+  if(!res.ok) throw new Error(d.error||'Ralat pelayan');
+  return d;
+}
 
 async function spinRenderUserList() {
   var el = document.getElementById('spin-user-list');
   el.innerHTML = '<div style="color:#64748b;font-size:11px;padding:8px">Memuatkan...</div>';
   try {
-    SPIN_USERS = await sbGet('spin_auth', 'select=*&order=id.asc');
+    var d = await admFn('list_users');
     el.innerHTML = '';
-    SPIN_USERS.forEach(function(u) {
+    d.users.forEach(function(u) {
       var r = document.createElement('div'); r.className = 'adm-row';
       r.innerHTML = '<span class="adm-row-name">' + u.username + '</span>'
         + '<span class="role-badge ' + (u.role==='admin'?'rb-admin':'rb-guru') + '">' + (u.role==='admin'?'Admin':'Guru') + '</span>'
-        + (u.username === 'admin'
-            ? '<span style="font-size:9px;color:#334155">Dilindungi</span>'
-            : '<button class="adm-del-btn" onclick="spinDelUser(' + u.id + ',\'' + u.username + '\')">Buang</button>');
+        + (u.must_change_password?'<span style="font-size:9px;color:#f59e0b">Belum set pasword</span>':'')
+        + (u.username === SPIN_CU.username
+            ? '<span style="font-size:9px;color:#334155">Anda</span>'
+            : '<button class="adm-del-btn" onclick="spinDelUser(\''+u.username+'\')">Buang</button>');
       el.appendChild(r);
     });
   } catch(e) { el.innerHTML = '<div style="color:#fca5a5;font-size:11px">Ralat: ' + e.message + '</div>'; }
@@ -755,27 +783,24 @@ async function spinRenderUserList() {
 
 async function spinAddUser() {
   var n = document.getElementById('nu-name').value.trim();
-  var p = document.getElementById('nu-pw').value;
   var r = document.getElementById('nu-role').value;
   var m = document.getElementById('msg-user');
   if (!n) { m.innerHTML = '<span class="a-bad">Nama diperlukan.</span>'; return; }
-  if (p.length < 4) { m.innerHTML = '<span class="a-bad">Min. 4 aksara.</span>'; return; }
+  m.innerHTML = 'Mencipta akaun...';
   try {
-    await sbPost('spin_auth', { username: n, password: p, role: r });
-    await spinRenderUserList();
+    var d = await admFn('create_user', {username:n, role:r});
     document.getElementById('nu-name').value = '';
-    document.getElementById('nu-pw').value = '';
-    m.innerHTML = '<span class="a-ok">&#10003; "' + n + '" ditambah.</span>';
-    setTimeout(function(){ m.textContent = ''; }, 3000);
-  } catch(e) {
-    m.innerHTML = '<span class="a-bad">Ralat: nama mungkin sudah wujud.</span>';
-  }
+    m.innerHTML = '<span class="a-ok">&#10003; Akaun "'+d.username+'" dicipta.<br>'+
+      'Kata laluan sementara: <b style="user-select:all">'+d.password+'</b><br>'+
+      '(Beri kepada pengguna — mereka akan diminta tukar pasword kali pertama log masuk)</span>';
+    await spinRenderUserList();
+  } catch(e) { m.innerHTML = '<span class="a-bad">'+e.message+'</span>'; }
 }
 
-async function spinDelUser(id, uname) {
-  if (!confirm('Padam pengguna "' + uname + '"?')) return;
+async function spinDelUser(username) {
+  if (!confirm('Padam pengguna "' + username + '"?')) return;
   try {
-    await sbDelete('spin_auth', 'id=eq.' + id);
+    await admFn('delete_user', {username:username});
     await spinRenderUserList();
   } catch(e) { toast('Ralat padam: ' + e.message); }
 }
@@ -785,16 +810,17 @@ async function spinChangePw() {
   var nw = document.getElementById('pw-new').value;
   var cf = document.getElementById('pw-conf').value;
   var m = document.getElementById('msg-pw');
-  if (SPIN_CU.password !== cur) { m.innerHTML = '<span class="a-bad">Kata laluan semasa salah.</span>'; return; }
-  if (nw.length < 4) { m.innerHTML = '<span class="a-bad">Min. 4 aksara.</span>'; return; }
+  if (!cur) { m.innerHTML = '<span class="a-bad">Isi kata laluan semasa.</span>'; return; }
+  if (nw.length < 6) { m.innerHTML = '<span class="a-bad">Min. 6 aksara.</span>'; return; }
   if (nw !== cf) { m.innerHTML = '<span class="a-bad">Tidak sepadan.</span>'; return; }
-  try {
-    await sbPatch('spin_auth', 'id=eq.' + SPIN_CU.id, { password: nw });
-    SPIN_CU.password = nw;
-    m.innerHTML = '<span class="a-ok">&#10003; Berjaya ditukar.</span>';
-    ['pw-cur','pw-new','pw-conf'].forEach(function(id){ document.getElementById(id).value = ''; });
-    setTimeout(function(){ m.textContent = ''; }, 3000);
-  } catch(e) { m.innerHTML = '<span class="a-bad">Ralat: ' + e.message + '</span>'; }
+  var email = sbMakeEmail(SPIN_CU.username, KOD_SEKOLAH);
+  var verify = await sbFetch('/auth/v1/token?grant_type=password', {method:'POST', body: JSON.stringify({email:email,password:cur})});
+  if(!verify.ok){ m.innerHTML = '<span class="a-bad">Kata laluan semasa salah.</span>'; return; }
+  var res = await sbFetch('/auth/v1/user', {method:'PUT', body: JSON.stringify({password:nw})});
+  if(!res.ok){ m.innerHTML = '<span class="a-bad">Ralat menukar pasword.</span>'; return; }
+  m.innerHTML = '<span class="a-ok">&#10003; Berjaya ditukar.</span>';
+  ['pw-cur','pw-new','pw-conf'].forEach(function(id){ document.getElementById(id).value = ''; });
+  setTimeout(function(){ m.textContent = ''; }, 3000);
 }
 
 function spinToast(msg) {
@@ -940,7 +966,7 @@ function defaultData(){
 
 async function loadAll(){
   try {
-    var rows = await sbGet('spin_data', 'id=eq.1&select=all_data,cur_tahun');
+    var rows = await sbGet('spin_school_data', 'kod_sekolah=eq.'+KOD_SEKOLAH+'&select=all_data,cur_tahun');
     if (rows && rows.length && rows[0].all_data && Object.keys(rows[0].all_data).length) {
       allData = rows[0].all_data;
       curTahun = rows[0].cur_tahun || Object.keys(allData).sort(function(a,b){return b-a;})[0] || '2025';
@@ -963,18 +989,16 @@ async function loadAll(){
 
 async function pushData(){
   try {
-    // UPSERT to row id=1
-    var r = await fetch(SB_URL + '/rest/v1/spin_data?id=eq.1', {
-      method: 'PATCH',
-      headers: SB_HEADERS,
-      body: JSON.stringify({ all_data: allData, cur_tahun: curTahun, updated_at: new Date().toISOString() })
+    // UPSERT baris untuk kod_sekolah ni
+    var res = await sbFetch('/rest/v1/spin_school_data?kod_sekolah=eq.'+KOD_SEKOLAH, {
+      method: 'PATCH', headers: {'Prefer':'return=minimal'},
+      body: JSON.stringify({ all_data: allData, cur_tahun: curTahun })
     });
-    if (!r.ok) {
-      // Row doesn't exist yet, insert it
-      await fetch(SB_URL + '/rest/v1/spin_data', {
-        method: 'POST',
-        headers: SB_HEADERS,
-        body: JSON.stringify({ id: 1, all_data: allData, cur_tahun: curTahun })
+    if (!res.ok) {
+      // Baris belum wujud — insert baru
+      await sbFetch('/rest/v1/spin_school_data', {
+        method: 'POST', headers: {'Prefer':'return=minimal'},
+        body: JSON.stringify({ kod_sekolah: KOD_SEKOLAH, all_data: allData, cur_tahun: curTahun })
       });
     }
     return true;
@@ -1758,7 +1782,7 @@ function startKeepAlive() {
   if (keepAliveTimer) clearInterval(keepAliveTimer);
   keepAliveTimer = setInterval(async function(){
     try {
-      await sbGet('spin_auth', 'select=id&limit=1');
+      await sbGet('spin_users', 'select=user_id&limit=1');
     } catch(e) { console.warn('Keep-alive failed:', e); }
   }, 4 * 60 * 1000); // setiap 4 minit
 }
@@ -1825,6 +1849,19 @@ document.addEventListener('visibilitychange', function(){
     autoRefresh(); // refresh terus bila tab/app aktif semula
   }
 });
+</script>
+
+<script>
+// EduKit keep-alive
+(function(){
+  var _kaUrl = typeof SUPA_URL !== 'undefined' ? SUPA_URL : (typeof SB_URL !== 'undefined' ? SB_URL : '');
+  var _kaKey = typeof SUPA_KEY !== 'undefined' ? SUPA_KEY : (typeof SB_KEY !== 'undefined' ? SB_KEY : '');
+  if (!_kaUrl || !_kaKey) return;
+  if (window._ekKaTimer) clearInterval(window._ekKaTimer);
+  window._ekKaTimer = setInterval(function(){
+    fetch(_kaUrl+'/rest/v1/', {headers:{'apikey':_kaKey,'Authorization':'Bearer '+_kaKey}}).catch(function(){});
+  }, 4*60*1000);
+})();
 </script>
 </body>
 </html>

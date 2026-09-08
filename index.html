@@ -204,17 +204,16 @@ td input[type=number]:focus { outline: none; border-color: #1a56db; box-shadow: 
 
 @media(max-width:768px){
   .hrow {
-    flex-wrap: nowrap !important;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: 2px;
-    scrollbar-width: none;
+    flex-wrap: wrap !important;
+    overflow-x: visible;
+    padding-bottom: 0;
   }
-  .hrow::-webkit-scrollbar { display: none; }
   #header { box-shadow: 0 2px 12px rgba(0,0,0,.12); }
-  .btn { min-height: 38px; min-width: 38px; flex-shrink: 0; }
-  .sel { min-height: 38px; flex-shrink: 0; }
-  .subj-btn { min-height: 36px; flex-shrink: 0; }
+  .btn { min-height: 40px; }
+  .sel { min-height: 40px; }
+  .subj-btn { min-height: 36px; }
+  .tahun-box { flex-shrink: 0; }
+  #saveStatus { flex-shrink: 0; }
   #user-info-bar { gap: 4px; }
   .ui-name { display: none; }
   .ui-role-admin, .ui-role-guru { display: none; }

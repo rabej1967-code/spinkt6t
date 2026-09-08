@@ -214,6 +214,10 @@ td input[type=number]:focus { outline: none; border-color: #1a56db; box-shadow: 
   .subj-btn { min-height: 36px; }
   .tahun-box { flex-shrink: 0; }
   #saveStatus { flex-shrink: 0; }
+  #toolbarToggle { display: inline-flex !important; }
+  #toolbarToggle.active { background: #1a56db; color: #fff; border-color: #1a56db; }
+  #toolbarExtra { display: none; }
+  #toolbarExtra.open { display: block; animation: tin 0.15s ease; }
   #user-info-bar { gap: 4px; }
   .ui-name { display: none; }
   .ui-role-admin, .ui-role-guru { display: none; }
@@ -425,7 +429,9 @@ td input[type=number]:focus { outline: none; border-color: #1a56db; box-shadow: 
         <button class="tahun-del" onclick="delTahun()">-</button>
       </div>
       <span id="saveStatus">&#9729; Cloud</span>
+      <button class="btn" id="toolbarToggle" onclick="toggleToolbar()" style="display:none;margin-left:auto;">&#9776; Menu</button>
     </div>
+    <div id="toolbarExtra">
     <div class="hrow">
       <button class="btn btn-mode active" id="btnKelas" onclick="setMode('kelas')">Kelas</button>
       <button class="btn btn-mode" id="btnMulti" onclick="setMode('multi')">Multi-Kelas</button>
@@ -450,7 +456,17 @@ td input[type=number]:focus { outline: none; border-color: #1a56db; box-shadow: 
       <div id="subjList" style="display:flex;gap:4px;flex-wrap:wrap;"></div>
       <button class="btn" onclick="doTambahSubjek()">+ Subjek</button>
     </div>
+    </div>
   </div>
+
+<script>
+function toggleToolbar(){
+  var el = document.getElementById('toolbarExtra');
+  var btn = document.getElementById('toolbarToggle');
+  el.classList.toggle('open');
+  btn.classList.toggle('active');
+}
+</script>
 
   <div id="content">
     <div class="tbl-wrap">

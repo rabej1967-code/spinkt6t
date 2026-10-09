@@ -435,7 +435,7 @@ td input[type=number]:focus { outline: none; border-color: #1a56db; box-shadow: 
     <div class="hrow">
       <button class="btn btn-mode active" id="btnKelas" onclick="setMode('kelas')">Kelas</button>
       <button class="btn btn-mode" id="btnMulti" onclick="setMode('multi')">Multi-Kelas</button>
-      <select class="sel" id="kelasSel" onchange="renderAll()"></select>
+      <select class="sel" id="kelasSel" onchange="renderAll(); saveView();"></select>
       <button class="btn btn-blue" onclick="doTambahKelas()">+ Kelas</button>
       <button class="btn btn-blue" onclick="doTambahPelajar()">+ Pelajar</button>
       <button class="btn btn-blue" onclick="doTambahUjian()">+ Ujian</button>
@@ -718,10 +718,13 @@ async function spinLoginOK() {
   spinRenderUserBar();
   setSaveStatus('Memuatkan data...', 'saving');
   await loadAll();
+  document.getElementById('btnKelas').classList.toggle('active', mode==='kelas');
+  document.getElementById('btnMulti').classList.toggle('active', mode==='multi');
   renderTahunSel();
   renderKelasSel();
   renderSubjList();
   renderAll();
+  saveView();
   setSaveStatus('☁ Cloud', '');
   spinToast('Selamat datang, ' + SPIN_CU.username + '!');
   startAutoRefresh();
@@ -736,6 +739,7 @@ async function doLogout() {
     try { await saveAll(); } catch(e) { console.error('Flush save on logout failed:', e); }
   }
   allData = {}; curTahun = '2025'; subjects = {}; curSubject = null;
+  syncBase = null; syncUpdatedAt = null;
   SPIN_CU = null;
   stopAutoRefresh();
   stopKeepAlive();
@@ -994,12 +998,211 @@ function defaultData(){
   };
 }
 
+
+// ============================================================
+// SEGERAK BERBILANG GURU (v5.1)
+// - Paparan (tahun/subjek/kelas/mod) disimpan dalam peranti sendiri.
+// - Data dikongsi digabung (merge), bukan ditimpa.
+// ============================================================
+var syncBase = null;        // salinan data cloud yang terakhir diketahui
+var syncUpdatedAt = null;
+var syncBusy = false;
+var pendingKelas = null;
+var VIEW_KEY = 'spin_view_v1';
+
+function loadView(){
+  try { return JSON.parse(localStorage.getItem(VIEW_KEY)) || {}; } catch(e){ return {}; }
+}
+function saveView(){
+  try {
+    var ks = document.getElementById('kelasSel');
+    localStorage.setItem(VIEW_KEY, JSON.stringify({
+      tahun: curTahun, subj: curSubject, kelas: ks ? ks.value : null, mode: mode
+    }));
+  } catch(e){}
+}
+
+function deepClone(x){ return x === undefined ? undefined : JSON.parse(JSON.stringify(x)); }
+function isObj(x){ return x !== null && typeof x === 'object' && !Array.isArray(x); }
+function deepEqual(a, b){
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null || typeof a !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)){
+    if (a.length !== b.length) return false;
+    for (var i=0;i<a.length;i++) if (!deepEqual(a[i], b[i])) return false;
+    return true;
+  }
+  var ka = Object.keys(a).filter(function(k){ return a[k] !== undefined; });
+  var kb = Object.keys(b).filter(function(k){ return b[k] !== undefined; });
+  if (ka.length !== kb.length) return false;
+  for (var j=0;j<ka.length;j++){ if (!Object.prototype.hasOwnProperty.call(b, ka[j]) || !deepEqual(a[ka[j]], b[ka[j]])) return false; }
+  return true;
+}
+
+function syncLocalIntoAllData(){
+  if (allData && allData[curTahun]){
+    allData[curTahun].subjects = subjects;
+    allData[curTahun].gradeScale = gradeScale;
+  }
+}
+
+// Gabung 3 hala: base = asal, l = versi guru ini, r = versi cloud
+function merge3(b, l, r, path){
+  if (deepEqual(l, r)) return deepClone(l);
+  if (deepEqual(l, b)) return deepClone(r);
+  if (deepEqual(r, b)) return deepClone(l);
+  if (path.length === 3 && path[1] === 'subjects' && isObj(l) && isObj(r)) return mergeSubject(isObj(b) ? b : null, l, r);
+  if (isObj(l) && isObj(r)) return mergeKeys(isObj(b) ? b : {}, l, r, path, merge3);
+  return deepClone(l); // konflik sebenar pada nilai yang sama: simpanan terkini menang
+}
+
+function mergeKeys(b, l, r, path, fn){
+  var out = {}, seen = {};
+  Object.keys(r).concat(Object.keys(l)).forEach(function(k){
+    if (seen[k]) return; seen[k] = 1;
+    var hb = b && Object.prototype.hasOwnProperty.call(b, k);
+    var hl = Object.prototype.hasOwnProperty.call(l, k);
+    var hr = Object.prototype.hasOwnProperty.call(r, k);
+    if (hl && hr) { out[k] = fn(hb ? b[k] : undefined, l[k], r[k], path.concat([k])); return; }
+    if (hl && !hr) { // tiada di cloud
+      if (hb && deepEqual(l[k], b[k])) return;          // dipadam oleh guru lain
+      out[k] = deepClone(l[k]); return;                 // baru / diubah oleh guru ini
+    }
+    if (hr && !hl) { // tiada di peranti ini
+      if (hb && deepEqual(r[k], b[k])) return;          // dipadam oleh guru ini
+      out[k] = deepClone(r[k]);                         // baru / diubah oleh guru lain
+    }
+  });
+  return out;
+}
+
+function ujianKeys(list){
+  var cnt = {};
+  return (list || []).map(function(u){ cnt[u] = (cnt[u]||0) + 1; return u + '\u0001' + cnt[u]; });
+}
+// Peta indeks ujian sesuatu versi -> indeks dalam senarai ujian akhir
+function ujianMap(fromList, finalList){
+  fromList = fromList || [];
+  if (fromList.length === finalList.length) return fromList.map(function(_, i){ return i; });
+  var fk = ujianKeys(finalList), k = ujianKeys(fromList);
+  return k.map(function(x){ return fk.indexOf(x); });
+}
+function alignMarks(markah, map, len){
+  var out = new Array(len);
+  (markah || []).forEach(function(m, i){ var t = map[i]; if (t !== undefined && t >= 0 && t < len) out[t] = m; });
+  return out;
+}
+
+function mergeSubject(b, l, r){
+  b = b || { kelasData: {}, ujian: [] };
+  var bu = b.ujian || [], lu = l.ujian || [], ru = r.ujian || [];
+  var U;
+  if (deepEqual(lu, ru) || deepEqual(ru, bu)) U = deepClone(lu);
+  else if (deepEqual(lu, bu)) U = deepClone(ru);
+  else if (lu.length === ru.length && ru.length === bu.length) U = lu.map(function(x, i){ return x !== bu[i] ? x : ru[i]; });
+  else U = deepClone(lu);
+  var mb = ujianMap(bu, U), ml = ujianMap(lu, U), mr = ujianMap(ru, U);
+
+  var out = mergeKeys(b, l, r, [], function(bv, lv, rv){ return merge3(bv, lv, rv, []); });
+  out.ujian = U;
+
+  var bk = b.kelasData || {}, lk = l.kelasData || {}, rk = r.kelasData || {};
+  var kelasOut = {}, seenK = {};
+  Object.keys(rk).concat(Object.keys(lk)).forEach(function(k){
+    if (seenK[k]) return; seenK[k] = 1;
+    var inB = Object.prototype.hasOwnProperty.call(bk, k), inL = Object.prototype.hasOwnProperty.call(lk, k), inR = Object.prototype.hasOwnProperty.call(rk, k);
+    if (!inL && inB && deepEqual(rk[k], bk[k])) return;
+    if (!inR && inB && deepEqual(lk[k], bk[k])) return;
+    kelasOut[k] = mergeStudents(bk[k] || [], lk[k] || [], rk[k] || [], mb, ml, mr, U.length);
+  });
+  out.kelasData = kelasOut;
+  return out;
+}
+
+function mergeStudents(bArr, lArr, rArr, mb, ml, mr, len){
+  function byName(arr){ var m = {}; arr.forEach(function(p){ if (p && p.nama != null && !m[p.nama]) m[p.nama] = p; }); return m; }
+  var B = byName(bArr), L = byName(lArr), R = byName(rArr);
+  var order = [], seen = {};
+  rArr.concat(lArr).forEach(function(p){ if (p && p.nama != null && !seen[p.nama]) { seen[p.nama] = 1; order.push(p.nama); } });
+  var res = [];
+  order.forEach(function(n){
+    var pb = B[n], pl = L[n], pr = R[n];
+    var ab = pb ? alignMarks(pb.markah, mb, len) : null;
+    var al = pl ? alignMarks(pl.markah, ml, len) : null;
+    var arr = pr ? alignMarks(pr.markah, mr, len) : null;
+    if (pl && !pr) { if (pb && deepEqual(al, ab)) return; }   // dipadam oleh guru lain
+    if (pr && !pl) { if (pb && deepEqual(arr, ab)) return; }  // dipadam oleh guru ini
+    var base = pl || pr;
+    var p = deepClone(base);
+    var marks = [];
+    for (var i = 0; i < len; i++){
+      var vb = ab ? ab[i] : undefined, vl = al ? al[i] : undefined, vr = arr ? arr[i] : undefined;
+      var v;
+      if (vl === vr) v = vl;
+      else if (vl === undefined) v = vr;
+      else if (vr === undefined) v = vl;
+      else if (vl === vb) v = vr;
+      else v = vl;
+      marks.push(v === undefined ? 0 : v);
+    }
+    p.markah = marks;
+    res.push(p);
+  });
+  return res;
+}
+
+function mergeData(base, local, remote){
+  return merge3(base || {}, local || {}, remote || {}, []);
+}
+
+// Pasang data baharu tanpa mengubah skrin guru ini
+function applyIncoming(newData){
+  var ae = document.activeElement;
+  var focusKey = ae && ae.getAttribute ? ae.getAttribute('data-mk') : null;
+  var typed = focusKey ? ae.value : null;
+  var selS = null, selE = null;
+  try { if (focusKey) { selS = ae.selectionStart; selE = ae.selectionEnd; } } catch(e){}
+  var wrap = document.getElementById('tbody') ? document.getElementById('tbody').closest('div') : null;
+  var scrollTop = wrap ? wrap.scrollTop : 0, scrollLeft = wrap ? wrap.scrollLeft : 0;
+
+  allData = newData;
+  if (!allData[curTahun]) curTahun = Object.keys(allData).sort(function(a,b){return b-a;})[0];
+  if (!allData[curTahun]) { allData[curTahun] = { subjects:{}, gradeScale: defaultGradeScale() }; }
+  if (!allData[curTahun].subjects) allData[curTahun].subjects = {};
+  subjects = allData[curTahun].subjects;
+  if (!curSubject || !subjects[curSubject]) curSubject = Object.keys(subjects)[0] || null;
+  gradeScale = (allData[curTahun].gradeScale && allData[curTahun].gradeScale.length) ? allData[curTahun].gradeScale : defaultGradeScale();
+
+  destroyCharts();
+  renderTahunSel();
+  renderKelasSel();
+  renderSubjList();
+  renderAll();
+
+  if (wrap) { wrap.scrollTop = scrollTop; wrap.scrollLeft = scrollLeft; }
+  if (focusKey) {
+    var el = document.querySelector('input[data-mk="' + focusKey + '"]');
+    if (el) {
+      var shown = el.value;
+      el.value = typed;
+      el.focus();
+      if (typed !== shown) el.addEventListener('blur', function(){ if (el.onchange) el.onchange(); }, { once: true });
+      try { if (selS !== null) el.setSelectionRange(selS, selE); } catch(e){}
+    }
+  }
+}
+
 async function loadAll(){
   try {
-    var rows = await sbGet('spin_data', 'id=eq.1&select=all_data,cur_tahun');
+    var rows = await sbGet('spin_data', 'id=eq.1&select=all_data,cur_tahun,updated_at');
     if (rows && rows.length && rows[0].all_data && Object.keys(rows[0].all_data).length) {
       allData = rows[0].all_data;
-      curTahun = rows[0].cur_tahun || Object.keys(allData).sort(function(a,b){return b-a;})[0] || '2025';
+      syncBase = deepClone(allData);
+      syncUpdatedAt = rows[0].updated_at || null;
+      var v = loadView();
+      curTahun = (v.tahun && allData[v.tahun]) ? v.tahun
+        : (rows[0].cur_tahun || Object.keys(allData).sort(function(a,b){return b-a;})[0] || '2025');
     } else {
       allData = { '2025': defaultData() };
       curTahun = '2025';
@@ -1012,32 +1215,75 @@ async function loadAll(){
   }
 
   if (!allData[curTahun]) curTahun = Object.keys(allData).sort(function(a,b){return b-a;})[0];
-  subjects = allData[curTahun].subjects || {};
-  curSubject = allData[curTahun].currentSubject;
+  if (!allData[curTahun].subjects) allData[curTahun].subjects = {};
+  subjects = allData[curTahun].subjects;
+  var vv = loadView();
+  curSubject = (vv.tahun === curTahun && vv.subj && subjects[vv.subj]) ? vv.subj : allData[curTahun].currentSubject;
   if (!curSubject || !subjects[curSubject]) curSubject = Object.keys(subjects)[0] || null;
   gradeScale = (allData[curTahun].gradeScale && allData[curTahun].gradeScale.length) ? allData[curTahun].gradeScale : defaultGradeScale();
+  if (vv.kelas) pendingKelas = vv.kelas;
+  if (vv.mode === 'kelas' || vv.mode === 'multi') mode = vv.mode;
 }
 
-async function pushData(){
+async function pushData(force){
+  // Simpan dengan GABUNG: ambil data terkini dari cloud, gabungkan perubahan
+  // guru ini, kemudian tulis hanya jika tiada guru lain menulis di tengah-tengah.
+  syncBusy = true;
   try {
-    // UPSERT to row id=1
-    var r = await fetch(SB_URL + '/rest/v1/spin_data?id=eq.1', {
-      method: 'PATCH',
-      headers: SB_HEADERS,
-      body: JSON.stringify({ all_data: allData, cur_tahun: curTahun, updated_at: new Date().toISOString() })
-    });
-    if (!r.ok) {
-      // Row doesn't exist yet, insert it
-      await fetch(SB_URL + '/rest/v1/spin_data', {
-        method: 'POST',
-        headers: SB_HEADERS,
-        body: JSON.stringify({ id: 1, all_data: allData, cur_tahun: curTahun })
+    syncLocalIntoAllData();
+    var localSnap = deepClone(allData);
+    for (var attempt = 0; attempt < 5; attempt++) {
+      var rows = await sbGet('spin_data', 'id=eq.1&select=all_data,updated_at');
+      if (!rows || !rows.length) {
+        await fetch(SB_URL + '/rest/v1/spin_data', {
+          method: 'POST', headers: SB_HEADERS,
+          body: JSON.stringify({ id: 1, all_data: localSnap, cur_tahun: curTahun, updated_at: new Date().toISOString() })
+        });
+        syncBase = deepClone(localSnap);
+        return true;
+      }
+      var remote = rows[0].all_data || {};
+      var remoteAt = rows[0].updated_at;
+      var merged = force ? deepClone(localSnap) : mergeData(syncBase || {}, localSnap, remote);
+      var newAt = new Date().toISOString();
+      var filter = 'id=eq.1&updated_at=' + (remoteAt ? 'eq.' + encodeURIComponent(remoteAt) : 'is.null');
+      var r = await fetch(SB_URL + '/rest/v1/spin_data?' + filter, {
+        method: 'PATCH', headers: SB_HEADERS,
+        body: JSON.stringify({ all_data: merged, updated_at: newAt })
       });
+      var wrote = false, savedAt = newAt;
+      if (r.ok) {
+        var res = await r.json();
+        wrote = Array.isArray(res) && res.length > 0;
+        if (wrote && res[0].updated_at) savedAt = res[0].updated_at;
+      } else {
+        // Penapis tarikh tidak disokong: tulis data yang SUDAH digabung
+        var r2 = await fetch(SB_URL + '/rest/v1/spin_data?id=eq.1', {
+          method: 'PATCH', headers: SB_HEADERS,
+          body: JSON.stringify({ all_data: merged, updated_at: newAt })
+        });
+        if (!r2.ok) throw new Error(await r2.text());
+        wrote = true;
+      }
+      if (wrote) {
+        // Kekalkan apa-apa yang guru ini taip semasa simpanan sedang berjalan
+        syncLocalIntoAllData();
+        var current = deepClone(allData);
+        var next = mergeData(localSnap, current, merged);
+        if (!deepEqual(next, current)) applyIncoming(next);
+        syncBase = deepClone(merged);
+        syncUpdatedAt = savedAt;
+        return true;
+      }
+      // Guru lain menulis serentak — cuba semula dengan data terkini
+      await new Promise(function(res){ setTimeout(res, 300 + Math.random()*700); });
     }
-    return true;
+    return false;
   } catch(e) {
     console.error('pushData error:', e);
     return false;
+  } finally {
+    syncBusy = false;
   }
 }
 
@@ -1047,24 +1293,22 @@ async function pushData(){
 // last-resort safety net, not a replacement for the normal saveAll()/pushData().
 function emergencyFlush(){
   try {
-    allData[curTahun].subjects = subjects;
-    allData[curTahun].currentSubject = curSubject;
-    allData[curTahun].gradeScale = gradeScale;
-    fetch(SB_URL + '/rest/v1/spin_data?id=eq.1', {
+    syncLocalIntoAllData();
+    // Hanya tulis jika tiada guru lain menyimpan sejak segerak terakhir (elak timpa data mereka)
+    var filter = 'id=eq.1&updated_at=' + (syncUpdatedAt ? 'eq.' + encodeURIComponent(syncUpdatedAt) : 'is.null');
+    fetch(SB_URL + '/rest/v1/spin_data?' + filter, {
       method: 'PATCH',
       headers: SB_HEADERS,
       keepalive: true,
-      body: JSON.stringify({ all_data: allData, cur_tahun: curTahun, updated_at: new Date().toISOString() })
+      body: JSON.stringify({ all_data: allData, updated_at: new Date().toISOString() })
     });
   } catch(e) { console.error('emergencyFlush error:', e); }
 }
 
-async function saveAll(){
-  allData[curTahun].subjects = subjects;
-  allData[curTahun].currentSubject = curSubject;
-  allData[curTahun].gradeScale = gradeScale;
+async function saveAll(force){
+  clearTimeout(saveTimer); saveTimer = null;
   setSaveStatus('Menyimpan...', 'saving');
-  var ok = await pushData();
+  var ok = await pushData(force === true);
   if (ok) {
     setSaveStatus('&#9729; Tersimpan', '');
     toast('Data tersimpan ke cloud');
@@ -1093,11 +1337,10 @@ function renderTahunSel(){
 }
 
 async function switchTahun(t){
-  allData[curTahun].subjects = subjects;
-  allData[curTahun].currentSubject = curSubject;
-  allData[curTahun].gradeScale = gradeScale;
+  syncLocalIntoAllData();
   curTahun = t;
-  subjects = allData[t].subjects || {};
+  if (!allData[t].subjects) allData[t].subjects = {};
+  subjects = allData[t].subjects;
   curSubject = allData[t].currentSubject;
   gradeScale = (allData[t].gradeScale && allData[t].gradeScale.length) ? allData[t].gradeScale : defaultGradeScale();
   if (!curSubject || !subjects[curSubject]) curSubject = Object.keys(subjects)[0] || null;
@@ -1106,7 +1349,7 @@ async function switchTahun(t){
   renderKelasSel();
   renderSubjList();
   renderAll();
-  await saveAll();
+  saveView();
 }
 
 function addTahun(){
@@ -1117,17 +1360,16 @@ function addTahun(){
     if (!v || isNaN(Number(v))){ toast('Tahun tidak sah'); return; }
     if (allData[v]){ toast('Tahun '+v+' sudah wujud'); return; }
     allData[v] = { subjects:{}, currentSubject:null, gradeScale: JSON.parse(JSON.stringify(gradeScale)) };
-    allData[curTahun].subjects = subjects;
-    allData[curTahun].currentSubject = curSubject;
-    allData[curTahun].gradeScale = gradeScale;
+    syncLocalIntoAllData();
     curTahun = v;
-    subjects = {};
+    subjects = allData[v].subjects;
     curSubject = null;
     destroyCharts();
     renderTahunSel();
     renderKelasSel();
     renderSubjList();
     renderAll();
+    saveView();
     await saveAll();
     toast('Tahun '+v+' ditambah');
   });
@@ -1168,12 +1410,11 @@ function renderSubjList(){
 
 function switchSubj(s){
   curSubject = s;
-  allData[curTahun].currentSubject = s;
   destroyCharts();
   renderKelasSel();
   renderSubjList();
   renderAll();
-  autoSave();
+  saveView();
 }
 
 function doTambahSubjek(){
@@ -1214,7 +1455,8 @@ function getCurSubj(){
 
 function renderKelasSel(){
   var sel = document.getElementById('kelasSel');
-  var prev = sel.value;
+  var prev = sel.value || pendingKelas;
+  pendingKelas = null;
   var kelas = Object.keys(getCurSubj().kelasData);
   sel.innerHTML = kelas.map(function(k){ return '<option value="'+k+'"'+(k===prev?' selected':'')+'>'+k+'</option>'; }).join('');
 }
@@ -1380,6 +1622,7 @@ function saveGradeModal(){
 // ============================================================
 function setMode(m){
   mode = m;
+  saveView();
   document.getElementById('btnKelas').classList.toggle('active', m==='kelas');
   document.getElementById('btnMulti').classList.toggle('active', m==='multi');
   destroyCharts();
@@ -1429,7 +1672,7 @@ function renderTable(data){
       +'<td style="color:#64748b">'+p.kelas+'</td>';
     p.markah.forEach(function(m,j){
       b += '<td class="'+cellClass(num(m))+'">'
-        +'<input type="number" value="'+Math.round(num(m))+'" min="0" max="100" '
+        +'<input type="number" value="'+Math.round(num(m))+'" min="0" max="100" data-mk="'+encodeURIComponent(p.kelas+'|'+p.nama+'|'+j)+'" '
         +'onchange="updateMark(\''+p.kelas+'\',\''+p.nama+'\','+j+',this.value)">'
         +'</td>';
     });
@@ -1690,7 +1933,8 @@ function handleJSON(e){
         if (!ok) return;
         allData = d.allData;
         curTahun = d.curTahun || Object.keys(allData).sort(function(a,b){return b-a;})[0];
-        subjects = allData[curTahun].subjects || {};
+        if (!allData[curTahun].subjects) allData[curTahun].subjects = {};
+        subjects = allData[curTahun].subjects;
         curSubject = allData[curTahun].currentSubject;
         if (!curSubject||!subjects[curSubject]) curSubject=Object.keys(subjects)[0]||null;
         destroyCharts();
@@ -1698,7 +1942,8 @@ function handleJSON(e){
         renderKelasSel();
         renderSubjList();
         renderAll();
-        await saveAll();
+        saveView();
+        await saveAll(true);
         toast('Import JSON berjaya');
       });
     } catch(err){ toast('Ralat membaca JSON'); }
@@ -1902,27 +2147,20 @@ var isSaving = false;
 
 async function autoRefresh(){
   if (!SPIN_CU) return;
-  if (isSaving) return; // jangan refresh semasa sedang simpan
+  if (syncBusy || isSaving) return; // jangan refresh semasa sedang simpan
   try {
-    var rows = await sbGet('spin_data', 'id=eq.1&select=all_data,cur_tahun,updated_at');
-    if (!rows || !rows.length) return;
-    var remoteData = rows[0].all_data;
-    var remoteTahun = rows[0].cur_tahun;
-    // Bandingkan data — jika berbeza, update UI
-    if (JSON.stringify(remoteData) !== JSON.stringify(allData)) {
-      allData = remoteData;
-      curTahun = remoteTahun || Object.keys(allData).sort(function(a,b){return b-a;})[0] || '2025';
-      if (!allData[curTahun]) curTahun = Object.keys(allData).sort(function(a,b){return b-a;})[0];
-      subjects = allData[curTahun].subjects || {};
-      curSubject = allData[curTahun].currentSubject;
-      if (!curSubject || !subjects[curSubject]) curSubject = Object.keys(subjects)[0] || null;
-      destroyCharts();
-      renderTahunSel();
-      renderKelasSel();
-      renderSubjList();
-      renderAll();
+    var rows = await sbGet('spin_data', 'id=eq.1&select=all_data,updated_at');
+    if (!rows || !rows.length || syncBusy) return;
+    var remote = rows[0].all_data || {};
+    if (syncBase && deepEqual(remote, syncBase)) return; // tiada perubahan dari guru lain
+    syncLocalIntoAllData();
+    var mine = deepClone(allData);
+    var merged = mergeData(syncBase || {}, mine, remote);
+    syncBase = deepClone(remote);
+    syncUpdatedAt = rows[0].updated_at || null;
+    if (!deepEqual(merged, mine)) {
+      applyIncoming(merged);
       setSaveStatus('&#9729; Disegerakkan', '');
-      toast('Data disegerakkan dari device lain');
     }
   } catch(e) {
     console.warn('Auto-refresh error:', e);
@@ -1931,7 +2169,7 @@ async function autoRefresh(){
 
 function startAutoRefresh(){
   if (refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(autoRefresh, 30000); // 30 saat
+  refreshTimer = setInterval(autoRefresh, 15000); // 15 saat
 }
 
 function stopAutoRefresh(){
@@ -1939,12 +2177,7 @@ function stopAutoRefresh(){
 }
 
 // Override saveAll untuk set flag isSaving
-var _origSaveAll = saveAll;
-saveAll = async function(){
-  isSaving = true;
-  await _origSaveAll();
-  setTimeout(function(){ isSaving = false; }, 2000);
-};
+
 
 // ============================================================
 // INIT

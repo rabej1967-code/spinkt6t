@@ -1,6 +1,55 @@
 <!DOCTYPE html>
 <html lang="ms">
 <head>
+<script id="edukit-kod-resolver">
+/* EduKit: pengguna tidak perlu tahu atau menaip kod sekolah. Kod dicari daripada e-mel pembelian sekali sahaja per peranti. */
+(function(){
+  try{
+    var K='ck_kod_sekolah_remembered', u=new URL(location.href);
+    var t=(u.searchParams.get('t')||'').trim().toUpperCase();
+    if(t){ try{localStorage.setItem(K,t);}catch(e){} return; }
+    var r=''; try{ r=(localStorage.getItem(K)||'').trim().toUpperCase(); }catch(e){}
+    if(r){ u.searchParams.set('t',r); history.replaceState(null,'',u.toString()); return; }
+    var SB='https://aowzftmdriukxbltjtpm.supabase.co';
+    var KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFvd3pmdG1kcml1a3hibHRqdHBtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4NzAxOTQsImV4cCI6MjA5NDQ0NjE5NH0.17lKaGC-9jx1cDORx2btwfmzDYon3s3CN2dei2BM-Ac';
+    function show(){
+      var o=document.createElement('div');
+      o.id='edukit-kod-overlay';
+      o.style.cssText='position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#0f172a,#1e3a8a);padding:16px;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+      o.innerHTML='<div style="background:#fff;border-radius:16px;padding:28px;width:100%;max-width:380px;box-shadow:0 20px 60px rgba(0,0,0,.35)">'
+        +'<div style="font-size:20px;font-weight:800;color:#0f172a">Sahkan akaun anda</div>'
+        +'<div style="font-size:13px;color:#64748b;margin:6px 0 16px;line-height:1.5">Masukkan e-mel yang anda gunakan semasa pembelian. Ini hanya perlu sekali pada peranti ini.</div>'
+        +'<input id="edukit-em" type="email" autocomplete="email" placeholder="e-mel@contoh.com" style="width:100%;box-sizing:border-box;padding:12px;border:1px solid #cbd5e1;border-radius:10px;font-size:15px;margin-bottom:10px">'
+        +'<button id="edukit-go" style="width:100%;padding:12px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-weight:700;font-size:15px;cursor:pointer">Teruskan &rarr;</button>'
+        +'<div id="edukit-er" style="display:none;color:#dc2626;font-size:12px;margin-top:10px;line-height:1.4"></div>'
+        +'</div>';
+      document.body.appendChild(o);
+      var em=document.getElementById('edukit-em'), go=document.getElementById('edukit-go'), er=document.getElementById('edukit-er');
+      function fail(m){ er.textContent=m; er.style.display='block'; go.disabled=false; go.textContent='Teruskan →'; }
+      function submit(){
+        var v=(em.value||'').trim();
+        er.style.display='none';
+        if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)){ fail('Sila masukkan e-mel yang sah.'); return; }
+        go.disabled=true; go.textContent='Menyemak...';
+        fetch(SB+'/rest/v1/rpc/edukit_kod_by_email',{method:'POST',headers:{'apikey':KEY,'Authorization':'Bearer '+KEY,'Content-Type':'application/json'},body:JSON.stringify({p_email:v})})
+          .then(function(x){ return x.json(); })
+          .then(function(k){
+            k=(typeof k==='string'?k:'').trim().toUpperCase();
+            if(!k){ fail('E-mel tidak dijumpai. Guna e-mel yang sama semasa pembelian, atau buka app melalui pautan dalam emel anda.'); return; }
+            try{localStorage.setItem(K,k);}catch(e){}
+            var n=new URL(location.href); n.searchParams.set('t',k); location.replace(n.toString());
+          })
+          .catch(function(){ fail('Ralat sambungan. Sila cuba lagi.'); });
+      }
+      go.onclick=submit;
+      em.addEventListener('keydown',function(e){ if(e.key==='Enter') submit(); });
+      setTimeout(function(){ try{em.focus();}catch(e){} },50);
+    }
+    if(document.body) show(); else document.addEventListener('DOMContentLoaded',show);
+  }catch(e){}
+})();
+</script>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>SPIn Analytics</title>
@@ -596,7 +645,7 @@ async function spinBoot() {
   try {
     if(!KOD_SEKOLAH){
       hideLoading(); showAuthScreen();
-      document.getElementById('auth-err').textContent = 'URL tiada kod sekolah (?t=KODSEKOLAH). Hubungi admin.';
+      document.getElementById('auth-err').textContent = 'Sila buka app melalui pautan dalam emel anda atau dari dashboard (apps.cikgukita.com).';
       return;
     }
     setLoadingMsg('Menyemak sesi...', 55);
@@ -648,7 +697,7 @@ async function doLogin() {
   var err = document.getElementById('auth-err');
   var btn = document.getElementById('login-btn');
   err.textContent = '';
-  if(!KOD_SEKOLAH){ err.textContent = 'URL tiada kod sekolah (?t=KODSEKOLAH).'; return; }
+  if(!KOD_SEKOLAH){ err.textContent = 'Sila buka app melalui pautan dalam emel anda atau dari dashboard (apps.cikgukita.com).'; return; }
   if (!u || !p) { err.textContent = 'Sila isi semua maklumat.'; return; }
 
   btn.disabled = true; btn.textContent = 'Sedang log masuk...';
